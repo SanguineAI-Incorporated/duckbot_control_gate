@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Duckbot Safety Dashboard - Browser Simulation</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body { font-family: Arial; margin: 0; padding: 0; }
+    #map { height: 600px; width: 100%; }
+    #alerts { max-height: 200px; overflow-y:auto; background:#f8f8f8; padding:5px; }
+    .alert { margin:2px; padding:2px; }
+    .high { color:red; }
+    .caution { color:orange; }
+  </style>
+</head>
+<body>
+  <h2>Duckbot Safety Dashboard - Browser Simulation</h2>
+  <div id="map"></div>
+  <div id="alerts"><strong>Safety Alerts:</strong></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([25,25], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    const NUM_DUCKS = 15;
+    const NUM_DUCKBOTS = 3;
+    const NUM_HUMANS = 5;
+
+    // Initialize entities
+    const ducks = Array.from({length:NUM_DUCKS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50}));
+    const duckbots = Array.from({length:NUM_DUCKBOTS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,state:"feeding"}));
+    const humans = Array.from({length:NUM_HUMANS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,authorized:(i%2==0),distress:false,command:null}));
+
+    // Map markers
+    const duckMarkers = {}, duckbotMarkers = {}, humanMarkers = {};
+    const alertsDiv = document.getElementById("alerts");
+
+    // Decision Model
+    function duckbotDecision(duckbot, humans) {
+        let decision = {action:"continue", reason:""};
+        humans.forEach(human => {
+            const dist = Math.sqrt((duckbot.x-human.x)**2 + (duckbot.y-human.y)**2);
+            if(dist < 5) {
+                if(human.command === "Stop" || human.distress){
+                    decision.action = "move_away";
+                    decision.reason = `Human ${human.id} issued Stop / distress`;
+                    duckbot.x += (Math.random()*-3 -2);
+                    duckbot.y += (Math.random()*-3 -2);
+                } else if(human.authorized){
+                    decision.action = "pause_feeding";
+                    decision.reason = `Authorized human ${human.id} nearby`;
+                    duckbot.state = "paused";
+                } else {
+                    decision.action = "caution";
+                    decision.reason = `Unauthorized human ${human.id} nearby`;
+                }
+            }
+        });
+        return decision;
+    }
+
+    // Simulation loop
+    function updateSimulation(){
+        // Move ducks randomly
+        ducks.forEach(d => {
+            d.x = Math.max(0, Math.min(50, d.x + Math.random()*2-1));
+            d.y = Math.max(0, Math.min(50, d.y + Math.random()*2-1));
+        });
+
+        // Move humans randomly and randomly simulate commands/distress
+        humans.forEach(h => {
+            h.x = Math.max(0, Math.min(50, h.x + Math.random()*1.5-0.75));
+            h.y = Math.max(0, Math.min(50, h.y + Math.random()*1.5-0.75));
+            // Randomly simulate distress or Stop command
+            h.distress = Math.random()<0.02;
+            h.command = Math.random()<0.02 ? "Stop" : null;
+        });
+
+        // Update Duckbot decisions
+        const decisions = duckbots.map(db => duckbotDecision(db, humans));
+
+        // Update map markers
+        ducks.forEach(d => {
+            if(!duckMarkers[d.id]){
+                duckMarkers[d.id] = L.circleMarker([d.x,d.y],{radius:5,color:'yellow'}).addTo(map).bindPopup(`Duck ${d.id}`);
+            } else { duckMarkers[d.id].setLatLng([d.x,d.y]); }
+        });
+
+        duckbots.forEach(db => {
+            if(!duckbotMarkers[db.id]){
+                duckbotMarkers[db.id] = L.circleMarker([db.x,db.y],{radius:8,color:'blue'}).addTo(map).bindPopup(`Duckbot ${db.id}`);
+            } else { duckbotMarkers[db.id].setLatLng([db.x,db.y]); }
+        });
+
+        humans.forEach(h => {
+            const color = h.authorized ? 'green':'red';
+            if(!humanMarkers[h.id]){
+                humanMarkers[h.id] = L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
+            } else { humanMarkers[h.id].setLatLng([h.x,h.y]); }
+        });
+
+        // Display alerts
+        alertsDiv.innerHTML = "<strong>Safety Alerts:</strong><br>";
+        decisions.forEach(d => {
+            const cls = d.action==='move_away'?'high':d.action==='caution'?'caution':'';
+            alertsDiv.innerHTML += `<div class="alert ${cls}">Duckbot ${d.duckbot_id}: ${d.action} - ${d.reason}</div>`;
+        });
+    }
+
+    setInterval(updateSimulation, 1000);
+  </script>
+</body>
+</html>
