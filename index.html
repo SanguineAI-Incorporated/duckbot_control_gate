@@ -1,36 +1,40 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Duckbot Farm Safety Dashboard - Feeding Demo</title>
+  <title>Duckbot Farm Safety Dashboard</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
-    body { font-family: Arial; margin: 0; padding: 0; }
-    #map { height: 600px; width: 100%; }
-    #alerts { max-height: 200px; overflow-y:auto; background:#f8f8f8; padding:5px; }
+    body { font-family: Arial; margin: 0; padding: 0; display: flex; }
+    #map { height: 600px; width: 70%; }
+    #panel { width: 30%; padding: 10px; background: #f4f4f4; overflow-y:auto; }
+    #alerts { max-height: 300px; overflow-y:auto; background:#fff; padding:5px; border:1px solid #ccc; margin-top:10px; }
     .alert { margin:2px; padding:2px; }
     .high { color:red; }
     .caution { color:orange; }
+    h2,h3 { margin: 5px 0; }
   </style>
 </head>
 <body>
-  <h2>Duckbot Farm Safety Dashboard - Feeding Demo</h2>
   <div id="map"></div>
-  <div id="alerts"><strong>Safety Alerts:</strong></div>
+  <div id="panel">
+    <h2>Duckbot Status Panel</h2>
+    <div id="stats">
+      <p><strong>Incident Rate (IR):</strong> 0%</p>
+      <p><strong>MTTR:</strong> 0 s</p>
+    </div>
+    <h3>Safety Alerts</h3>
+    <div id="alerts"><strong>Recent Alerts:</strong></div>
+  </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // --- Farm Map Setup ---
-    const map = L.map('map', {
-        crs: L.CRS.Simple,
-        minZoom: -1,
-        maxZoom: 1
-    });
-
+    // --- Farm Map ---
+    const map = L.map('map', { crs: L.CRS.Simple, minZoom: -1, maxZoom: 1 });
     const farmBounds = [[0,0],[50,50]];
     L.imageOverlay('assets/farm-map.png', farmBounds).addTo(map);
     map.fitBounds(farmBounds);
 
-    // --- Simulation Entities ---
+    // --- Entities ---
     const NUM_DUCKS = 15;
     const NUM_DUCKBOTS = 3;
     const NUM_HUMANS = 5;
@@ -41,14 +45,18 @@
 
     const duckMarkers = {}, duckbotMarkers = {}, humanMarkers = {};
     const alertsDiv = document.getElementById("alerts");
+    const statsDiv = document.getElementById("stats");
 
-    // --- Optional Grid / Paddocks ---
+    // --- Event Log for IR & MTTR ---
+    const eventLog = []; // {timestamp, duckbot_id, event_type, responseTime}
+
+    // --- Grid for paddocks ---
     for(let i=0;i<=50;i+=5){
         L.polyline([[0,i],[50,i]],{color:'gray',weight:0.5}).addTo(map);
         L.polyline([[i,0],[i,50]],{color:'gray',weight:0.5}).addTo(map);
     }
 
-    // --- AI Decision Model ---
+    // --- Decision Model ---
     function duckbotDecision(duckbot, humans){
         let decision = {action:"continue", reason:""};
         humans.forEach(human=>{
@@ -56,15 +64,18 @@
             if(dist<5){
                 if(human.command==="Stop" || human.distress){
                     decision.action="move_away";
-                    decision.reason=`Human ${human.id} issued Stop / distress`;
+                    decision.reason=`Human ${human.id} issued Stop/distress`;
+                    const startTime = Date.now();
                     duckbot.state = "moving_away";
-                    // Move away from human
                     duckbot.x += (duckbot.x-human.x > 0 ? 1 : -1)*Math.random()*3;
                     duckbot.y += (duckbot.y-human.y > 0 ? 1 : -1)*Math.random()*3;
+                    // Log incident and MTTR
+                    eventLog.push({timestamp:startTime, duckbot_id:duckbot.id, event_type:"incident", responseTime: (Date.now()-startTime)/1000});
                 } else if(human.authorized){
                     decision.action="pause_feeding";
                     decision.reason=`Authorized human ${human.id} nearby`;
                     duckbot.state="paused";
+                    eventLog.push({timestamp:Date.now(), duckbot_id:duckbot.id, event_type:"incident", responseTime:0});
                 } else {
                     decision.action="caution";
                     decision.reason=`Unauthorized human ${human.id} nearby`;
@@ -74,51 +85,42 @@
         return decision;
     }
 
-    // --- Move Duckbots toward nearest duck if feeding ---
+    // --- Feeding ---
     function feedDuckbot(duckbot){
-        if(duckbot.state === "feeding"){
-            // Find nearest duck
-            let nearest = null;
-            let minDist = Infinity;
+        if(duckbot.state==="feeding"){
+            let nearest=null, minDist=Infinity;
             ducks.forEach(d=>{
-                const dist = Math.sqrt((duckbot.x-d.x)**2 + (duckbot.y-d.y)**2);
-                if(dist < minDist){
-                    minDist = dist;
-                    nearest = d;
-                }
+                const dist=Math.sqrt((duckbot.x-d.x)**2 + (duckbot.y-d.y)**2);
+                if(dist<minDist){ minDist=dist; nearest=d; }
             });
             if(nearest){
-                // Move toward duck (simple step)
                 const dx = nearest.x - duckbot.x;
                 const dy = nearest.y - duckbot.y;
-                const step = 0.5; // Duckbot speed
+                const step=0.5;
                 duckbot.x += dx*step/minDist;
                 duckbot.y += dy*step/minDist;
             }
         }
     }
 
-    // --- Simulation Loop ---
+    // --- Update Simulation ---
     function updateSimulation(){
         // Move ducks randomly
-        ducks.forEach(d=>{
-            d.x = Math.max(0, Math.min(50, d.x+Math.random()*2-1));
-            d.y = Math.max(0, Math.min(50, d.y+Math.random()*2-1));
-        });
+        ducks.forEach(d=>{ d.x=Math.max(0,Math.min(50,d.x+Math.random()*2-1)); d.y=Math.max(0,Math.min(50,d.y+Math.random()*2-1)); });
 
-        // Move humans randomly and simulate occasional distress / Stop commands
+        // Humans move and occasionally issue commands
         humans.forEach(h=>{
-            h.x = Math.max(0, Math.min(50, h.x+Math.random()*1.5-0.75));
-            h.y = Math.max(0, Math.min(50, h.y+Math.random()*1.5-0.75));
+            h.x=Math.max(0,Math.min(50,h.x+Math.random()*1.5-0.75));
+            h.y=Math.max(0,Math.min(50,h.y+Math.random()*1.5-0.75));
             h.distress = Math.random()<0.02;
             h.command = Math.random()<0.02?"Stop":null;
         });
 
-        // Duckbot decisions and feeding
+        // Duckbot decisions & feeding
         const decisions = duckbots.map(db=>{
-            const decision = duckbotDecision(db, humans);
-            feedDuckbot(db); // move toward duck if feeding
-            return {...decision, duckbot_id: db.id};
+            const dec=duckbotDecision(db, humans);
+            feedDuckbot(db);
+            return {...dec, duckbot_id:db.id};
         });
 
         // Update markers
@@ -136,12 +138,19 @@
             else humanMarkers[h.id].setLatLng([h.x,h.y]);
         });
 
-        // Update alerts
-        alertsDiv.innerHTML="<strong>Safety Alerts:</strong><br>";
+        // Update alerts panel
+        alertsDiv.innerHTML="<strong>Recent Alerts:</strong><br>";
         decisions.forEach(d=>{
             const cls=d.action==='move_away'?'high':d.action==='caution'?'caution':'';
             alertsDiv.innerHTML+=`<div class="alert ${cls}">Duckbot ${d.duckbot_id}: ${d.action} - ${d.reason}</div>`;
         });
+
+        // Update IR & MTTR
+        const incidentEvents = eventLog.filter(e=>e.event_type==="incident");
+        const IR = incidentEvents.length>0 ? ((incidentEvents.length / (duckbots.length*100))*100).toFixed(1) : 0;
+        const MTTR = incidentEvents.length>0 ? (incidentEvents.reduce((sum,e)=>sum+e.responseTime,0)/incidentEvents.length).toFixed(2) : 0;
+        statsDiv.innerHTML=`<p><strong>Incident Rate (IR):</strong> ${IR}%</p>
+                            <p><strong>MTTR:</strong> ${MTTR} s</p>`;
     }
 
     setInterval(updateSimulation,1000);
