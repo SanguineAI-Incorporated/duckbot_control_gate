@@ -7,11 +7,12 @@
     body { font-family: Arial; margin: 0; padding: 0; display: flex; }
     #map { height: 600px; width: 70%; }
     #panel { width: 30%; padding: 10px; background: #f4f4f4; overflow-y:auto; }
-    #alerts { max-height: 300px; overflow-y:auto; background:#fff; padding:5px; border:1px solid #ccc; margin-top:10px; }
+    #alerts { max-height: 200px; overflow-y:auto; background:#fff; padding:5px; border:1px solid #ccc; margin-top:10px; }
+    #legend { margin-top: 10px; background:#eee; padding:5px; border:1px solid #ccc; }
     .alert { margin:2px; padding:2px; }
     .high { color:red; }
     .caution { color:orange; }
-    h2,h3 { margin: 5px 0; }
+    h2,h3,h4 { margin: 5px 0; }
   </style>
 </head>
 <body>
@@ -24,6 +25,16 @@
     </div>
     <h3>Safety Alerts</h3>
     <div id="alerts"><strong>Recent Alerts:</strong></div>
+    <h4>Legend</h4>
+    <div id="legend">
+      <p><span style="color:yellow;">●</span> Duck</p>
+      <p><span style="color:blue;">●</span> Duckbot</p>
+      <p><span style="color:green;">●</span> Authorized Human</p>
+      <p><span style="color:red;">●</span> Unauthorized Human</p>
+      <p>⚠️ Human in distress</p>
+      <p>✋ Human issued Stop</p>
+      <p>➔ Duckbot movement path</p>
+    </div>
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -40,17 +51,17 @@
     const NUM_HUMANS = 5;
 
     const ducks = Array.from({length:NUM_DUCKS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50}));
-    const duckbots = Array.from({length:NUM_DUCKBOTS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,state:"feeding"}));
+    const duckbots = Array.from({length:NUM_DUCKBOTS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,state:"feeding",path:[]})); // path for trail
     const humans = Array.from({length:NUM_HUMANS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,authorized:(i%2==0),distress:false,command:null}));
 
-    const duckMarkers = {}, duckbotMarkers = {}, humanMarkers = {};
+    const duckMarkers = {}, duckbotMarkers = {}, humanMarkers = {}, duckbotTrails = {};
     const alertsDiv = document.getElementById("alerts");
     const statsDiv = document.getElementById("stats");
 
-    // --- Event Log for IR & MTTR ---
-    const eventLog = []; // {timestamp, duckbot_id, event_type, responseTime}
+    // --- Event Log ---
+    const eventLog = [];
 
-    // --- Grid for paddocks ---
+    // --- Grid ---
     for(let i=0;i<=50;i+=5){
         L.polyline([[0,i],[50,i]],{color:'gray',weight:0.5}).addTo(map);
         L.polyline([[i,0],[i,50]],{color:'gray',weight:0.5}).addTo(map);
@@ -59,26 +70,25 @@
     // --- Decision Model ---
     function duckbotDecision(duckbot, humans){
         let decision = {action:"continue", reason:""};
-        humans.forEach(human=>{
-            const dist = Math.sqrt((duckbot.x-human.x)**2 + (duckbot.y-human.y)**2);
+        humans.forEach(h=>{
+            const dist = Math.sqrt((duckbot.x-h.x)**2 + (duckbot.y-h.y)**2);
             if(dist<5){
-                if(human.command==="Stop" || human.distress){
+                if(h.command==="Stop" || h.distress){
                     decision.action="move_away";
-                    decision.reason=`Human ${human.id} issued Stop/distress`;
+                    decision.reason=`Human ${h.id} issued Stop/distress`;
                     const startTime = Date.now();
                     duckbot.state = "moving_away";
-                    duckbot.x += (duckbot.x-human.x > 0 ? 1 : -1)*Math.random()*3;
-                    duckbot.y += (duckbot.y-human.y > 0 ? 1 : -1)*Math.random()*3;
-                    // Log incident and MTTR
+                    duckbot.x += (duckbot.x-h.x > 0 ? 1 : -1)*Math.random()*3;
+                    duckbot.y += (duckbot.y-h.y > 0 ? 1 : -1)*Math.random()*3;
                     eventLog.push({timestamp:startTime, duckbot_id:duckbot.id, event_type:"incident", responseTime: (Date.now()-startTime)/1000});
-                } else if(human.authorized){
+                } else if(h.authorized){
                     decision.action="pause_feeding";
-                    decision.reason=`Authorized human ${human.id} nearby`;
+                    decision.reason=`Authorized human ${h.id} nearby`;
                     duckbot.state="paused";
                     eventLog.push({timestamp:Date.now(), duckbot_id:duckbot.id, event_type:"incident", responseTime:0});
                 } else {
                     decision.action="caution";
-                    decision.reason=`Unauthorized human ${human.id} nearby`;
+                    decision.reason=`Unauthorized human ${h.id} nearby`;
                 }
             }
         });
@@ -105,10 +115,10 @@
 
     // --- Update Simulation ---
     function updateSimulation(){
-        // Move ducks randomly
+        // Move ducks
         ducks.forEach(d=>{ d.x=Math.max(0,Math.min(50,d.x+Math.random()*2-1)); d.y=Math.max(0,Math.min(50,d.y+Math.random()*2-1)); });
 
-        // Humans move and occasionally issue commands
+        // Move humans & commands
         humans.forEach(h=>{
             h.x=Math.max(0,Math.min(50,h.x+Math.random()*1.5-0.75));
             h.y=Math.max(0,Math.min(50,h.y+Math.random()*1.5-0.75));
@@ -120,6 +130,11 @@
         const decisions = duckbots.map(db=>{
             const dec=duckbotDecision(db, humans);
             feedDuckbot(db);
+
+            // Update movement path for trail
+            if(!duckbotTrails[db.id]) duckbotTrails[db.id] = [];
+            duckbotTrails[db.id].push([db.x, db.y]);
+            if(duckbotTrails[db.id].length>10) duckbotTrails[db.id].shift(); // keep last 10 positions
             return {...dec, duckbot_id:db.id};
         });
 
@@ -131,14 +146,27 @@
         duckbots.forEach(db=>{
             if(!duckbotMarkers[db.id]) duckbotMarkers[db.id]=L.circleMarker([db.x,db.y],{radius:8,color:'blue'}).addTo(map).bindPopup(`Duckbot ${db.id}`);
             else duckbotMarkers[db.id].setLatLng([db.x,db.y]);
+            // Draw trail
+            if(duckbotTrails[db.id].length>1){
+                L.polyline(duckbotTrails[db.id],{color:'blue',weight:2,opacity:0.5}).addTo(map);
+            }
         });
         humans.forEach(h=>{
             const color=h.authorized?'green':'red';
-            if(!humanMarkers[h.id]) humanMarkers[h.id]=L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
-            else humanMarkers[h.id].setLatLng([h.x,h.y]);
+            if(!humanMarkers[h.id]){
+                humanMarkers[h.id]=L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map)
+                    .bindPopup(`Human ${h.id}`);
+            } else humanMarkers[h.id].setLatLng([h.x,h.y]);
+            // Add distress / Stop icon
+            if(h.distress || h.command==="Stop"){
+                const iconText = h.distress ? "⚠️" : "✋";
+                if(!humanMarkers[h.id].iconOverlay){
+                    humanMarkers[h.id].iconOverlay=L.marker([h.x,h.y], {icon:L.divIcon({className:'human-icon', html: iconText, iconSize:[20,20]})}).addTo(map);
+                } else humanMarkers[h.id].iconOverlay.setLatLng([h.x,h.y]);
+            } else if(humanMarkers[h.id].iconOverlay){ map.removeLayer(humanMarkers[h.id].iconOverlay); humanMarkers[h.id].iconOverlay=null; }
         });
 
-        // Update alerts panel
+        // Update alerts
         alertsDiv.innerHTML="<strong>Recent Alerts:</strong><br>";
         decisions.forEach(d=>{
             const cls=d.action==='move_away'?'high':d.action==='caution'?'caution':'';
