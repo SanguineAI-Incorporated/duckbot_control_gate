@@ -1,44 +1,45 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Duckbot Farm Safety Dashboard</title>
+  <title>Duckbot Coordination Dashboard</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
-    body { font-family: Arial; margin: 0; padding: 0; display: flex; height: 100vh; }
-    #map { flex: 1; height: 100%; }
+    body { font-family: Arial; margin:0; padding:0; display:flex; height:100vh; }
+    #map { flex:1; height:100%; }
     #panel {
-      width: 350px; 
-      padding: 10px; 
-      background: #f4f4f4; 
-      display: flex; 
-      flex-direction: column;
-      height: 100%;
-      box-sizing: border-box;
+      width: 400px;
+      padding:10px;
+      background:#f4f4f4;
+      display:flex;
+      flex-direction:column;
+      height:100%;
+      box-sizing:border-box;
     }
-    #stats, #alerts, #legend {
-      background: #fff; 
-      border: 1px solid #ccc; 
-      padding: 8px; 
-      margin-bottom: 10px; 
-      overflow-y: auto;
+    #stats, #alerts, #legend, #tasks {
+      background:#fff; border:1px solid #ccc; padding:8px; margin-bottom:10px; overflow-y:auto;
     }
-    #stats { max-height: 80px; }
-    #alerts { flex: 1; max-height: 250px; }
-    #legend { max-height: 150px; }
+    #stats { max-height:120px; }
+    #tasks { max-height:150px; }
+    #alerts { flex:1; max-height:250px; }
+    #legend { max-height:150px; }
     .alert { margin:2px; padding:2px; }
     .high { color:red; }
     .caution { color:orange; }
-    h2,h3,h4 { margin: 5px 0; }
+    h2,h3,h4 { margin:5px 0; }
   </style>
 </head>
 <body>
   <div id="map"></div>
   <div id="panel">
-    <h2>Duckbot Status Panel</h2>
+    <h2>Duckbot Coordination Panel</h2>
     <div id="stats">
+      <p><strong>Occupancy:</strong> 0%</p>
+      <p><strong>Caution Zone:</strong> 0%</p>
       <p><strong>Incident Rate (IR):</strong> 0%</p>
       <p><strong>MTTR:</strong> 0 s</p>
     </div>
+    <h3>Duckbot Tasks</h3>
+    <div id="tasks"><strong>Assignments:</strong></div>
     <h3>Safety Alerts</h3>
     <div id="alerts"><strong>Recent Alerts:</strong></div>
     <h4>Legend</h4>
@@ -49,143 +50,177 @@
       <p><span style="color:red; font-weight:bold;">●</span> Unauthorized Human</p>
       <p>⚠️ Human in distress</p>
       <p>✋ Human issued Stop</p>
-      <p>➔ Duckbot movement path</p>
+      <p style="color:orange;">■</span> Predicted Risk</p>
+      <p>➔ Duckbot path</p>
     </div>
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
-    // --- Farm Map ---
-    const map = L.map('map', { crs: L.CRS.Simple, minZoom: -1, maxZoom: 1 });
-    const farmBounds = [[0,0],[50,50]];
-    L.imageOverlay('assets/farm-map.png', farmBounds).addTo(map);
+    // --- Map ---
+    const map = L.map('map', {crs:L.CRS.Simple,minZoom:-1,maxZoom:1});
+    const FARM_SIZE=50;
+    const GRID_SIZE=50;
+    const farmBounds=[[0,0],[FARM_SIZE,FARM_SIZE]];
     map.fitBounds(farmBounds);
 
+    // --- Grid Setup ---
+    const cellLayers=[];
+    for(let x=0;x<GRID_SIZE;x++){
+      cellLayers[x]=[];
+      for(let y=0;y<GRID_SIZE;y++){
+        const rect=L.rectangle([[x,y],[x+1,y+1]],{color:'#ccc', weight:0.5, fillOpacity:0.1}).addTo(map);
+        cellLayers[x][y]=rect;
+      }
+    }
+
     // --- Entities ---
-    const NUM_DUCKS = 15;
-    const NUM_DUCKBOTS = 3;
-    const NUM_HUMANS = 5;
+    const NUM_DUCKS=15, NUM_DUCKBOTS=3, NUM_HUMANS=5;
+    const ducks = Array.from({length:NUM_DUCKS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,assigned:false}));
+    const duckbots = Array.from({length:NUM_DUCKBOTS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,state:"feeding",path:[],targetDuckId:null}));
+    const humans = Array.from({length:NUM_HUMANS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,authorized:(i%2==0),distress:false,command:null}));
 
-    const ducks = Array.from({length:NUM_DUCKS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50}));
-    const duckbots = Array.from({length:NUM_DUCKBOTS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,state:"feeding",path:[]})); 
-    const humans = Array.from({length:NUM_HUMANS}, (_,i)=>({id:i,x:Math.random()*50,y:Math.random()*50,authorized:(i%2==0),distress:false,command:null}));
-
-    const duckMarkers = {}, duckbotMarkers = {}, humanMarkers = {}, duckbotTrails = {};
+    const duckMarkers={}, duckbotMarkers={}, humanMarkers={};
+    const pathLayers={}, riskLayers={};
     const alertsDiv = document.getElementById("alerts");
     const statsDiv = document.getElementById("stats");
+    const tasksDiv = document.getElementById("tasks");
+    const eventLog=[];
 
-    // --- Event Log ---
-    const eventLog = [];
-
-    // --- Grid ---
-    for(let i=0;i<=50;i+=5){
-        L.polyline([[0,i],[50,i]],{color:'gray',weight:0.5}).addTo(map);
-        L.polyline([[i,0],[i,50]],{color:'gray',weight:0.5}).addTo(map);
-    }
-
-    // --- Decision Model ---
-    function duckbotDecision(duckbot, humans){
-        let decision = {action:"continue", reason:""};
-        humans.forEach(h=>{
-            const dist = Math.sqrt((duckbot.x-h.x)**2 + (duckbot.y-h.y)**2);
-            if(dist<5){
-                if(h.command==="Stop" || h.distress){
-                    decision.action="move_away";
-                    decision.reason=`Human ${h.id} issued Stop/distress`;
-                    const startTime = Date.now();
-                    duckbot.state = "moving_away";
-                    duckbot.x += (duckbot.x-h.x > 0 ? 1 : -1)*Math.random()*3;
-                    duckbot.y += (duckbot.y-h.y > 0 ? 1 : -1)*Math.random()*3;
-                    eventLog.push({timestamp:startTime, duckbot_id:duckbot.id, event_type:"incident", responseTime: (Date.now()-startTime)/1000});
-                } else if(h.authorized){
-                    decision.action="pause_feeding";
-                    decision.reason=`Authorized human ${h.id} nearby`;
-                    duckbot.state="paused";
-                    eventLog.push({timestamp:Date.now(), duckbot_id:duckbot.id, event_type:"incident", responseTime:0});
-                } else {
-                    decision.action="caution";
-                    decision.reason=`Unauthorized human ${h.id} nearby`;
-                }
-            }
-        });
-        return decision;
-    }
-
-    // --- Feeding ---
-    function feedDuckbot(duckbot){
-        if(duckbot.state==="feeding"){
-            let nearest=null, minDist=Infinity;
-            ducks.forEach(d=>{
-                const dist=Math.sqrt((duckbot.x-d.x)**2 + (duckbot.y-d.y)**2);
-                if(dist<minDist){ minDist=dist; nearest=d; }
-            });
-            if(nearest){
-                const dx = nearest.x - duckbot.x;
-                const dy = nearest.y - duckbot.y;
-                const step=0.5;
-                duckbot.x += dx*step/minDist;
-                duckbot.y += dy*step/minDist;
-            }
+    // --- Assign Tasks ---
+    function assignTasks(){
+      duckbots.forEach(db=>{
+        if(db.targetDuckId===null){
+          const target = ducks.find(d=>!d.assigned);
+          if(target){ db.targetDuckId=target.id; target.assigned=true; db.path=[]; }
         }
+      });
+    }
+
+    // --- Predictive Risk ---
+    const grid = Array.from({length:GRID_SIZE},()=>Array(GRID_SIZE).fill(0));
+    function computePredictiveRisk(){
+      for(let x=0;x<GRID_SIZE;x++){
+        for(let y=0;y<GRID_SIZE;y++){
+          let risk=0;
+          humans.forEach(h=>{
+            const dist=Math.hypot(h.x-x,h.y-y);
+            if(dist<3) risk=Math.max(risk,0.8);
+          });
+          duckbots.forEach(db=>{
+            const dist=Math.hypot(db.x-x,db.y-y);
+            if(dist<2) risk=Math.max(risk,0.5);
+          });
+          grid[x][y]=risk;
+        }
+      }
+    }
+
+    // --- Update Grid Visualization ---
+    function updateGrid(){
+      for(let x=0;x<GRID_SIZE;x++){
+        for(let y=0;y<GRID_SIZE;y++){
+          let color='#fff',opacity=0.1;
+          // Occupancy
+          ducks.forEach(d=>{ if(Math.floor(d.x)===x && Math.floor(d.y)===y){ color='yellow'; opacity=0.6; } });
+          duckbots.forEach(db=>{ if(Math.floor(db.x)===x && Math.floor(db.y)===y){ color='blue'; opacity=0.6; } });
+          humans.forEach(h=>{ 
+            if(Math.floor(h.x)===x && Math.floor(h.y)===y){ color=h.authorized?'green':'red'; if(h.distress) color='orange'; opacity=0.6; }
+          });
+          // Risk overlay
+          if(grid[x][y]>0){ color='orange'; opacity=grid[x][y]*0.7; }
+          cellLayers[x][y].setStyle({fillColor:color, fillOpacity:opacity});
+        }
+      }
+    }
+
+    // --- Duckbot Movement & Path ---
+    function moveDuckbots(){
+      duckbots.forEach(db=>{
+        if(db.targetDuckId!==null){
+          const target = ducks.find(d=>d.id===db.targetDuckId);
+          const dx=target.x-db.x, dy=target.y-db.y, dist=Math.hypot(dx,dy);
+          if(dist>0.5){
+            const step=0.5;
+            db.x+=dx*step/dist; db.y+=dy*step/dist;
+            db.path.push([db.x,db.y]);
+            if(db.path.length>10) db.path.shift();
+          } else { db.targetDuckId=null; target.assigned=false; }
+        }
+      });
+    }
+
+    // --- Update Map ---
+    function updateMap(){
+      // Duck markers
+      ducks.forEach(d=>{
+        if(!duckMarkers[d.id]) duckMarkers[d.id]=L.circleMarker([d.x,d.y],{radius:5,color:'yellow'}).addTo(map).bindPopup(`Duck ${d.id}`);
+        else duckMarkers[d.id].setLatLng([d.x,d.y]);
+      });
+      // Duckbot markers
+      duckbots.forEach(db=>{
+        if(!duckbotMarkers[db.id]) duckbotMarkers[db.id]=L.circleMarker([db.x,db.y],{radius:8,color:'blue'}).addTo(map).bindPopup(`Duckbot ${db.id}`);
+        else duckbotMarkers[db.id].setLatLng([db.x,db.y]);
+        // Draw path
+        if(pathLayers[db.id]) pathLayers[db.id].remove();
+        if(db.path.length>1){
+          pathLayers[db.id]=L.polyline(db.path,{color:'blue',weight:2,opacity:0.5}).addTo(map);
+        }
+      });
+      // Human markers
+      humans.forEach(h=>{
+        const color=h.authorized?'green':'red';
+        if(!humanMarkers[h.id]) humanMarkers[h.id]=L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
+        else humanMarkers[h.id].setLatLng([h.x,h.y]);
+      });
+    }
+
+    // --- Update Panels ---
+    function updatePanels(){
+      const occupied=ducks.length+duckbots.length+humans.length;
+      const occupancyPercent=(occupied/(GRID_SIZE*GRID_SIZE)*100).toFixed(1);
+      const caution = humans.filter(h=>h.distress).length;
+      const cautionPercent=(caution/(GRID_SIZE*GRID_SIZE)*100).toFixed(1);
+      const incidentEvents = eventLog.filter(e=>e.event_type==="incident");
+      const IR = incidentEvents.length>0 ? ((incidentEvents.length/(duckbots.length*100))*100).toFixed(1) : 0;
+      const MTTR = incidentEvents.length>0 ? (incidentEvents.reduce((s,e)=>s+e.responseTime,0)/incidentEvents.length).toFixed(2) : 0;
+      statsDiv.innerHTML=`<p><strong>Occupancy:</strong> ${occupancyPercent}%</p>
+                          <p><strong>Caution Zone:</strong> ${cautionPercent}%</p>
+                          <p><strong>Incident Rate (IR):</strong> ${IR}%</p>
+                          <p><strong>MTTR:</strong> ${MTTR} s</p>`;
+
+      // Tasks panel
+      tasksDiv.innerHTML="<strong>Assignments:</strong><br>";
+      duckbots.forEach(db=>{
+        tasksDiv.innerHTML+=`Duckbot ${db.id}: ${db.targetDuckId!==null ? "Target Duck "+db.targetDuckId : "Idle"}<br>`;
+      });
+
+      // Alerts panel
+      alertsDiv.innerHTML="<strong>Recent Alerts:</strong><br>";
+      duckbots.forEach(db=>{
+        if(db.targetDuckId!==null){
+          const target = ducks.find(d=>d.id===db.targetDuckId);
+          const dist = Math.hypot(db.x-target.x, db.y-target.y);
+          if(dist<2) alertsDiv.innerHTML+=`<div class="alert caution">Duckbot ${db.id} approaching Duck ${target.id}</div>`;
+        }
+      });
     }
 
     // --- Update Simulation ---
-    function updateSimulation(){
-        ducks.forEach(d=>{ d.x=Math.max(0,Math.min(50,d.x+Math.random()*2-1)); d.y=Math.max(0,Math.min(50,d.y+Math.random()*2-1)); });
-        humans.forEach(h=>{
-            h.x=Math.max(0,Math.min(50,h.x+Math.random()*1.5-0.75));
-            h.y=Math.max(0,Math.min(50,h.y+Math.random()*1.5-0.75));
-            h.distress = Math.random()<0.02;
-            h.command = Math.random()<0.02?"Stop":null;
-        });
+    function tick(){
+      // Move humans & ducks
+      ducks.forEach(d=>{ d.x=Math.max(0,Math.min(FARM_SIZE,d.x+Math.random()*2-1)); d.y=Math.max(0,Math.min(FARM_SIZE,d.y+Math.random()*2-1)); });
+      humans.forEach(h=>{ h.x=Math.max(0,Math.min(FARM_SIZE,h.x+Math.random()*1.5-0.75)); h.y=Math.max(0,Math.min(FARM_SIZE,h.y+Math.random()*1.5-0.75)); h.distress=Math.random()<0.02; h.command=Math.random()<0.02?"Stop":null; });
 
-        const decisions = duckbots.map(db=>{
-            const dec=duckbotDecision(db, humans);
-            feedDuckbot(db);
-            if(!duckbotTrails[db.id]) duckbotTrails[db.id]=[];
-            duckbotTrails[db.id].push([db.x,db.y]);
-            if(duckbotTrails[db.id].length>10) duckbotTrails[db.id].shift();
-            return {...dec, duckbot_id:db.id};
-        });
-
-        ducks.forEach(d=>{
-            if(!duckMarkers[d.id]) duckMarkers[d.id]=L.circleMarker([d.x,d.y],{radius:5,color:'yellow'}).addTo(map).bindPopup(`Duck ${d.id}`);
-            else duckMarkers[d.id].setLatLng([d.x,d.y]);
-        });
-        duckbots.forEach(db=>{
-            if(!duckbotMarkers[db.id]) duckbotMarkers[db.id]=L.circleMarker([db.x,db.y],{radius:8,color:'blue'}).addTo(map).bindPopup(`Duckbot ${db.id}`);
-            else duckbotMarkers[db.id].setLatLng([db.x,db.y]);
-            if(duckbotTrails[db.id].length>1){
-                L.polyline(duckbotTrails[db.id],{color:'blue',weight:2,opacity:0.5}).addTo(map);
-            }
-        });
-        humans.forEach(h=>{
-            const color=h.authorized?'green':'red';
-            if(!humanMarkers[h.id]){
-                humanMarkers[h.id]=L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
-            } else humanMarkers[h.id].setLatLng([h.x,h.y]);
-            if(h.distress || h.command==="Stop"){
-                const iconText = h.distress ? "⚠️" : "✋";
-                if(!humanMarkers[h.id].iconOverlay){
-                    humanMarkers[h.id].iconOverlay=L.marker([h.x,h.y],{icon:L.divIcon({className:'human-icon', html: iconText, iconSize:[20,20]})}).addTo(map);
-                } else humanMarkers[h.id].iconOverlay.setLatLng([h.x,h.y]);
-            } else if(humanMarkers[h.id].iconOverlay){ map.removeLayer(humanMarkers[h.id].iconOverlay); humanMarkers[h.id].iconOverlay=null; }
-        });
-
-        alertsDiv.innerHTML="<strong>Recent Alerts:</strong><br>";
-        decisions.forEach(d=>{
-            const cls=d.action==='move_away'?'high':d.action==='caution'?'caution':'';
-            alertsDiv.innerHTML+=`<div class="alert ${cls}">Duckbot ${d.duckbot_id}: ${d.action} - ${d.reason}</div>`;
-        });
-
-        const incidentEvents = eventLog.filter(e=>e.event_type==="incident");
-        const IR = incidentEvents.length>0 ? ((incidentEvents.length / (duckbots.length*100))*100).toFixed(1) : 0;
-        const MTTR = incidentEvents.length>0 ? (incidentEvents.reduce((sum,e)=>sum+e.responseTime,0)/incidentEvents.length).toFixed(2) : 0;
-        statsDiv.innerHTML=`<p><strong>Incident Rate (IR):</strong> ${IR}%</p>
-                            <p><strong>MTTR:</strong> ${MTTR} s</p>`;
+      assignTasks();
+      moveDuckbots();
+      computePredictiveRisk();
+      updateGrid();
+      updateMap();
+      updatePanels();
     }
 
-    setInterval(updateSimulation,1000);
+    setInterval(tick,1000);
   </script>
 </body>
 </html>
