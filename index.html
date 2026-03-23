@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Duckbot Coordination Dashboard</title>
+  <title>Duckbot Operator Demo</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     body { font-family: Arial; margin:0; padding:0; display:flex; height:100vh; }
@@ -15,11 +15,8 @@
       height:100%;
       box-sizing:border-box;
     }
-    #stats, #alerts, #legend, #tasks {
-      background:#fff; border:1px solid #ccc; padding:8px; margin-bottom:10px; overflow-y:auto;
-    }
+    #stats, #alerts, #legend { background:#fff; border:1px solid #ccc; padding:8px; margin-bottom:10px; overflow-y:auto; }
     #stats { max-height:120px; }
-    #tasks { max-height:150px; }
     #alerts { flex:1; max-height:250px; }
     #legend { max-height:150px; }
     .alert { margin:2px; padding:2px; }
@@ -31,193 +28,143 @@
 <body>
   <div id="map"></div>
   <div id="panel">
-    <h2>Duckbot Coordination Panel</h2>
+    <h2>Duckbot Operator Demo</h2>
     <div id="stats">
-      <p><strong>Occupancy:</strong> 0%</p>
-      <p><strong>Caution Zone:</strong> 0%</p>
       <p><strong>Incident Rate (IR):</strong> 0%</p>
       <p><strong>MTTR:</strong> 0 s</p>
+      <p><strong>Ducks Out-of-Bounds:</strong> 0</p>
+      <p><strong>Humans in Herd:</strong> 0</p>
     </div>
-    <h3>Duckbot Tasks</h3>
-    <div id="tasks"><strong>Assignments:</strong></div>
-    <h3>Safety Alerts</h3>
-    <div id="alerts"><strong>Recent Alerts:</strong></div>
+    <h3>AI Alerts</h3>
+    <div id="alerts"><strong>Active Alerts:</strong></div>
     <h4>Legend</h4>
     <div id="legend">
-      <p><span style="color:yellow; font-weight:bold;">●</span> Duck</p>
-      <p><span style="color:blue; font-weight:bold;">●</span> Duckbot</p>
+      <p><span style="color:yellow; font-weight:bold;">●</span> Duck (with Duckbot sensor)</p>
       <p><span style="color:green; font-weight:bold;">●</span> Authorized Human</p>
       <p><span style="color:red; font-weight:bold;">●</span> Unauthorized Human</p>
-      <p>⚠️ Human in distress</p>
-      <p>✋ Human issued Stop</p>
-      <p style="color:orange;">■</span> Predicted Risk</p>
-      <p>➔ Duckbot path</p>
+      <p>⚠️ Alert: Duck Out-of-Bounds</p>
+      <p>⚠️ Alert: Human Approaching Ducks</p>
+      <p style="color:orange;">■ Predicted Risk Zone</p>
+      <p style="color:blue;">○ Operator Guidance Zone</p>
     </div>
   </div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
     // --- Map ---
-    const map = L.map('map', {crs:L.CRS.Simple,minZoom:-1,maxZoom:1});
-    const FARM_SIZE=50;
-    const GRID_SIZE=50;
-    const farmBounds=[[0,0],[FARM_SIZE,FARM_SIZE]];
-    map.fitBounds(farmBounds);
+    const map = L.map('map',{crs:L.CRS.Simple,minZoom:-1,maxZoom:1});
+    const FARM_SIZE = 50;
+    map.fitBounds([[0,0],[FARM_SIZE,FARM_SIZE]]);
 
-    // --- Grid Setup ---
-    const cellLayers=[];
-    for(let x=0;x<GRID_SIZE;x++){
-      cellLayers[x]=[];
-      for(let y=0;y<GRID_SIZE;y++){
-        const rect=L.rectangle([[x,y],[x+1,y+1]],{color:'#ccc', weight:0.5, fillOpacity:0.1}).addTo(map);
-        cellLayers[x][y]=rect;
-      }
-    }
+    // --- Simulation entities ---
+    const NUM_DUCKS = 15, NUM_HUMANS = 5;
+    const ducks = Array.from({length:NUM_DUCKS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,outOfBounds:false,incidentActive:null}));
+    const humans = Array.from({length:NUM_HUMANS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,authorized:(i%2===0),incidentActive:null}));
+    const operator = {x:FARM_SIZE/2, y:FARM_SIZE/2, targetZone:{x:FARM_SIZE/2, y:FARM_SIZE/2, radius:8}};
+    const eventLog = [];
 
-    // --- Entities ---
-    const NUM_DUCKS=15, NUM_DUCKBOTS=3, NUM_HUMANS=5;
-    const ducks = Array.from({length:NUM_DUCKS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,assigned:false}));
-    const duckbots = Array.from({length:NUM_DUCKBOTS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,state:"feeding",path:[],targetDuckId:null}));
-    const humans = Array.from({length:NUM_HUMANS},(_,i)=>({id:i,x:Math.random()*FARM_SIZE,y:Math.random()*FARM_SIZE,authorized:(i%2==0),distress:false,command:null}));
-
-    const duckMarkers={}, duckbotMarkers={}, humanMarkers={};
-    const pathLayers={}, riskLayers={};
-    const alertsDiv = document.getElementById("alerts");
-    const statsDiv = document.getElementById("stats");
-    const tasksDiv = document.getElementById("tasks");
-    const eventLog=[];
-
-    // --- Assign Tasks ---
-    function assignTasks(){
-      duckbots.forEach(db=>{
-        if(db.targetDuckId===null){
-          const target = ducks.find(d=>!d.assigned);
-          if(target){ db.targetDuckId=target.id; target.assigned=true; db.path=[]; }
-        }
-      });
-    }
-
-    // --- Predictive Risk ---
-    const grid = Array.from({length:GRID_SIZE},()=>Array(GRID_SIZE).fill(0));
-    function computePredictiveRisk(){
-      for(let x=0;x<GRID_SIZE;x++){
-        for(let y=0;y<GRID_SIZE;y++){
-          let risk=0;
-          humans.forEach(h=>{
-            const dist=Math.hypot(h.x-x,h.y-y);
-            if(dist<3) risk=Math.max(risk,0.8);
-          });
-          duckbots.forEach(db=>{
-            const dist=Math.hypot(db.x-x,db.y-y);
-            if(dist<2) risk=Math.max(risk,0.5);
-          });
-          grid[x][y]=risk;
-        }
-      }
-    }
-
-    // --- Update Grid Visualization ---
-    function updateGrid(){
-      for(let x=0;x<GRID_SIZE;x++){
-        for(let y=0;y<GRID_SIZE;y++){
-          let color='#fff',opacity=0.1;
-          // Occupancy
-          ducks.forEach(d=>{ if(Math.floor(d.x)===x && Math.floor(d.y)===y){ color='yellow'; opacity=0.6; } });
-          duckbots.forEach(db=>{ if(Math.floor(db.x)===x && Math.floor(db.y)===y){ color='blue'; opacity=0.6; } });
-          humans.forEach(h=>{ 
-            if(Math.floor(h.x)===x && Math.floor(h.y)===y){ color=h.authorized?'green':'red'; if(h.distress) color='orange'; opacity=0.6; }
-          });
-          // Risk overlay
-          if(grid[x][y]>0){ color='orange'; opacity=grid[x][y]*0.7; }
-          cellLayers[x][y].setStyle({fillColor:color, fillOpacity:opacity});
-        }
-      }
-    }
-
-    // --- Duckbot Movement & Path ---
-    function moveDuckbots(){
-      duckbots.forEach(db=>{
-        if(db.targetDuckId!==null){
-          const target = ducks.find(d=>d.id===db.targetDuckId);
-          const dx=target.x-db.x, dy=target.y-db.y, dist=Math.hypot(dx,dy);
-          if(dist>0.5){
-            const step=0.5;
-            db.x+=dx*step/dist; db.y+=dy*step/dist;
-            db.path.push([db.x,db.y]);
-            if(db.path.length>10) db.path.shift();
-          } else { db.targetDuckId=null; target.assigned=false; }
-        }
-      });
-    }
-
-    // --- Update Map ---
-    function updateMap(){
-      // Duck markers
+    // --- Map layers ---
+    const duckMarkers={}, humanMarkers={};
+    const riskLayers = L.layerGroup().addTo(map);
+    const operatorLayer = L.circle([operator.targetZone.y, operator.targetZone.x],{radius:operator.targetZone.radius*10,color:'blue',fillOpacity:0.2}).addTo(map);
+    
+    // --- Simulation tick ---
+    function tick() {
+      // Move ducks
       ducks.forEach(d=>{
-        if(!duckMarkers[d.id]) duckMarkers[d.id]=L.circleMarker([d.x,d.y],{radius:5,color:'yellow'}).addTo(map).bindPopup(`Duck ${d.id}`);
-        else duckMarkers[d.id].setLatLng([d.x,d.y]);
+        d.x += Math.random()*1.5-0.75;
+        d.y += Math.random()*1.5-0.75;
+        // Move toward operator guidance zone
+        const dx = operator.targetZone.x - d.x;
+        const dy = operator.targetZone.y - d.y;
+        const dist = Math.hypot(dx, dy);
+        if(dist>0){ d.x += dx*0.2/dist; d.y += dy*0.2/dist; }
+        // Out-of-bounds check
+        d.outOfBounds = !(d.x>=0 && d.x<=FARM_SIZE && d.y>=0 && d.y<=FARM_SIZE);
       });
-      // Duckbot markers
-      duckbots.forEach(db=>{
-        if(!duckbotMarkers[db.id]) duckbotMarkers[db.id]=L.circleMarker([db.x,db.y],{radius:8,color:'blue'}).addTo(map).bindPopup(`Duckbot ${db.id}`);
-        else duckbotMarkers[db.id].setLatLng([db.x,db.y]);
-        // Draw path
-        if(pathLayers[db.id]) pathLayers[db.id].remove();
-        if(db.path.length>1){
-          pathLayers[db.id]=L.polyline(db.path,{color:'blue',weight:2,opacity:0.5}).addTo(map);
-        }
-      });
-      // Human markers
+
+      // Move humans
       humans.forEach(h=>{
-        const color=h.authorized?'green':'red';
-        if(!humanMarkers[h.id]) humanMarkers[h.id]=L.circleMarker([h.x,h.y],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
-        else humanMarkers[h.id].setLatLng([h.x,h.y]);
-      });
-    }
-
-    // --- Update Panels ---
-    function updatePanels(){
-      const occupied=ducks.length+duckbots.length+humans.length;
-      const occupancyPercent=(occupied/(GRID_SIZE*GRID_SIZE)*100).toFixed(1);
-      const caution = humans.filter(h=>h.distress).length;
-      const cautionPercent=(caution/(GRID_SIZE*GRID_SIZE)*100).toFixed(1);
-      const incidentEvents = eventLog.filter(e=>e.event_type==="incident");
-      const IR = incidentEvents.length>0 ? ((incidentEvents.length/(duckbots.length*100))*100).toFixed(1) : 0;
-      const MTTR = incidentEvents.length>0 ? (incidentEvents.reduce((s,e)=>s+e.responseTime,0)/incidentEvents.length).toFixed(2) : 0;
-      statsDiv.innerHTML=`<p><strong>Occupancy:</strong> ${occupancyPercent}%</p>
-                          <p><strong>Caution Zone:</strong> ${cautionPercent}%</p>
-                          <p><strong>Incident Rate (IR):</strong> ${IR}%</p>
-                          <p><strong>MTTR:</strong> ${MTTR} s</p>`;
-
-      // Tasks panel
-      tasksDiv.innerHTML="<strong>Assignments:</strong><br>";
-      duckbots.forEach(db=>{
-        tasksDiv.innerHTML+=`Duckbot ${db.id}: ${db.targetDuckId!==null ? "Target Duck "+db.targetDuckId : "Idle"}<br>`;
+        h.x += Math.random()*1.5-0.75;
+        h.y += Math.random()*1.5-0.75;
       });
 
-      // Alerts panel
-      alertsDiv.innerHTML="<strong>Recent Alerts:</strong><br>";
-      duckbots.forEach(db=>{
-        if(db.targetDuckId!==null){
-          const target = ducks.find(d=>d.id===db.targetDuckId);
-          const dist = Math.hypot(db.x-target.x, db.y-target.y);
-          if(dist<2) alertsDiv.innerHTML+=`<div class="alert caution">Duckbot ${db.id} approaching Duck ${target.id}</div>`;
+      // --- Incident detection ---
+      ducks.forEach(d=>{
+        if(d.outOfBounds){
+          if(!d.incidentActive){
+            const e={timestamp:Date.now(),duckId:d.id,type:"out_of_bounds",resolved:false,resolutionTime:null};
+            eventLog.push(e);
+            d.incidentActive = e;
+          }
+        } else if(d.incidentActive && d.incidentActive.type==="out_of_bounds"){
+          d.incidentActive.resolved = true;
+          d.incidentActive.resolutionTime = Date.now();
+          d.incidentActive = null;
         }
       });
-    }
 
-    // --- Update Simulation ---
-    function tick(){
-      // Move humans & ducks
-      ducks.forEach(d=>{ d.x=Math.max(0,Math.min(FARM_SIZE,d.x+Math.random()*2-1)); d.y=Math.max(0,Math.min(FARM_SIZE,d.y+Math.random()*2-1)); });
-      humans.forEach(h=>{ h.x=Math.max(0,Math.min(FARM_SIZE,h.x+Math.random()*1.5-0.75)); h.y=Math.max(0,Math.min(FARM_SIZE,h.y+Math.random()*1.5-0.75)); h.distress=Math.random()<0.02; h.command=Math.random()<0.02?"Stop":null; });
+      humans.forEach(h=>{
+        const nearDuck = ducks.some(d=>Math.hypot(d.x-h.x,d.y-h.y)<3);
+        if(nearDuck){
+          if(!h.incidentActive){
+            const e={timestamp:Date.now(),humanId:h.id,type:"human_intrusion",resolved:false,resolutionTime:null};
+            eventLog.push(e);
+            h.incidentActive = e;
+          }
+        } else if(h.incidentActive && h.incidentActive.type==="human_intrusion"){
+          h.incidentActive.resolved = true;
+          h.incidentActive.resolutionTime = Date.now();
+          h.incidentActive = null;
+        }
+      });
 
-      assignTasks();
-      moveDuckbots();
-      computePredictiveRisk();
-      updateGrid();
-      updateMap();
-      updatePanels();
+      // --- Compute metrics ---
+      const incidents = eventLog;
+      const resolved = incidents.filter(e=>e.resolved);
+      const mttr = resolved.length>0 ? resolved.reduce((sum,e)=>sum+(e.resolutionTime-e.timestamp),0)/resolved.length/1000 : 0;
+      const ir = incidents.length>0 ? (incidents.length/ducks.length*100).toFixed(1) : 0;
+
+      document.getElementById("stats").innerHTML = `
+        <p><strong>Incident Rate (IR):</strong> ${ir}%</p>
+        <p><strong>MTTR:</strong> ${mttr.toFixed(2)} s</p>
+        <p><strong>Ducks Out-of-Bounds:</strong> ${ducks.filter(d=>d.outOfBounds).length}</p>
+        <p><strong>Humans in Herd:</strong> ${humans.filter(h=>ducks.some(d=>Math.hypot(d.x-h.x,d.y-h.y)<3)).length}</p>
+      `;
+
+      // --- Update markers ---
+      ducks.forEach(d=>{
+        if(!duckMarkers[d.id]) duckMarkers[d.id]=L.circleMarker([d.y,d.x],{radius:5,color:'yellow'}).addTo(map).bindPopup(`Duck ${d.id}`);
+        else duckMarkers[d.id].setLatLng([d.y,d.x]);
+      });
+      humans.forEach(h=>{
+        const color = h.authorized?'green':'red';
+        if(!humanMarkers[h.id]) humanMarkers[h.id]=L.circleMarker([h.y,h.x],{radius:6,color:color}).addTo(map).bindPopup(`Human ${h.id}`);
+        else humanMarkers[h.id].setLatLng([h.y,h.x]);
+      });
+
+      // --- AI Alerts ---
+      const alertsDiv = document.getElementById("alerts");
+      alertsDiv.innerHTML = "<strong>Active Alerts:</strong><br>";
+      ducks.forEach(d=>{ if(d.outOfBounds) alertsDiv.innerHTML+=`<div class="alert high">Duck ${d.id} Out-of-Bounds</div>`; });
+      humans.forEach(h=>{
+        const nearDuck = ducks.some(d=>Math.hypot(d.x-h.x,d.y-h.y)<3);
+        if(nearDuck) alertsDiv.innerHTML+=`<div class="alert caution">Human ${h.id} Approaching Ducks</div>`;
+      });
+
+      // --- Predictive risk overlay ---
+      riskLayers.clearLayers();
+      ducks.forEach(d=>{
+        const riskCircle = L.circle([d.y,d.x],{radius:2, color:'orange',fillOpacity:0.3});
+        riskLayers.addLayer(riskCircle);
+      });
+      humans.forEach(h=>{
+        const nearDuck = ducks.some(d=>Math.hypot(d.x-h.x,d.y-h.y)<3);
+        if(nearDuck){
+          const riskCircle = L.circle([h.y,h.x],{radius:3, color:'orange',fillOpacity:0.4});
+          riskLayers.addLayer(riskCircle);
+        }
+      });
     }
 
     setInterval(tick,1000);
